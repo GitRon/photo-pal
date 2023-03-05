@@ -126,7 +126,8 @@ class PhotoPal:
 
         print(f'\n*Low-hanging fruits*')
         for fruit in low_fruit_list:
-            print(f'"{fruit["container_name"].split(" ")[1]}/{fruit["name"]}" ({fruit["total"]} Elemente)')
+            print(f'"{fruit["container_name"].split(" ")[1]}/{fruit["name"]}" '
+                  f'({fruit["images"]} Bilder, {fruit["videos"]} Videos)')
 
         # Make a suggestion
         suggestion_list = []

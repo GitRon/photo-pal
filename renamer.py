@@ -4,7 +4,10 @@ from pathlib import Path
 
 
 class Renamer:
-    FOTO_DIR = "D:\\Fotos\\neu + unsortiert\\C Chaos\\Handy-Fotos 2012"
+    FOTO_DIR = "D:\\Fotos\\neu + unsortiert\\A Sortierbar\\Kölnpfad mit Jessi 2021\\11 Etappe 08"
+
+    PATTERN_OLD_SAMSUNG = r"^(\d{4})(\d{2})(\d{2})[_\-](\d{2})(\d{2})(\d{2})%s$"
+    PATTERN_WHATSAPP = r"^IMG-(\d{4})(\d{2})(\d{2})-W\d+%s$"
 
     def process(self):
         rename_counter = 0
@@ -12,7 +15,7 @@ class Renamer:
             if element.is_file():
                 extension = Path(element).suffix.lower()
                 filename = element.name
-                matches = re.search(r"^(\d{4})(\d{2})(\d{2})[_\-](\d{2})(\d{2})(\d{2})%s$" % extension, filename)
+                matches = re.search(self.PATTERN_OLD_SAMSUNG % extension, filename)
                 if not matches:
                     continue
                 year = matches[1]

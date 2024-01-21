@@ -10,7 +10,7 @@ class PhotoPal:
     VIDEO_TYPES = [".mp4", ".mov", ".avi"]
 
     MAX_DIRS_TO_CHOSE_FROM = 7
-    FRUIT_LENGTH = 10
+    SUGGESTION_LENGTH = 10
 
     CHANCE_FOR_CONTAINER_1 = 50
     CHANCE_FOR_CONTAINER_2 = 35
@@ -118,7 +118,7 @@ class PhotoPal:
         low_fruit_list = []
         for container_name, container_list in sorted_map.items():
             for directory in sorted_map[container_name]:
-                if len(low_fruit_list) > self.FRUIT_LENGTH:
+                if len(low_fruit_list) > self.SUGGESTION_LENGTH:
                     break
                 directory['container_name'] = container_name
                 low_fruit_list.append(directory)
@@ -128,6 +128,25 @@ class PhotoPal:
         for fruit in low_fruit_list:
             print(f'"{fruit["container_name"].split(" ")[1]}/{fruit["name"]}" '
                   f'({fruit["images"]} Bilder, {fruit["videos"]} Videos)')
+
+        # Sort by number of images and videos - reversed
+        sorted_map = {}
+        for key, container_dict in self.dir_map.items():
+            sorted_map[key] = sorted(container_dict, key=lambda item: item["total"], reverse=True)
+
+        challenge_list = []
+        for container_name, container_list in sorted_map.items():
+            for directory in sorted_map[container_name]:
+                if len(challenge_list) > self.SUGGESTION_LENGTH:
+                    break
+                directory['container_name'] = container_name
+                challenge_list.append(directory)
+        challenge_list = sorted(challenge_list, key=lambda item: item["total"], reverse=True)
+
+        print(f'\n*Herausforderungen*')
+        for challenge in challenge_list:
+            print(f'"{challenge["container_name"].split(" ")[1]}/{challenge["name"]}" '
+                  f'({challenge["images"]} Bilder, {challenge["videos"]} Videos)')
 
         # Make a suggestion
         suggestion_list = []

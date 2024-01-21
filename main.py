@@ -94,7 +94,7 @@ class PhotoPal:
             suggestion_index = 2
         print(suggestion_list[suggestion_index])
 
-    def process(self):
+    def _get_sorted_map_for_directories(self, reverse: bool):
         # Collect data
         for container in next(os.walk(self.FOTO_PATH))[1]:
             self._process_unsorted_category(container=container)
@@ -102,18 +102,11 @@ class PhotoPal:
         # Sort by number of images and videos
         sorted_map = {}
         for key, container_dict in self.dir_map.items():
-            sorted_map[key] = sorted(container_dict, key=lambda item: item["total"])
+            sorted_map[key] = sorted(container_dict, key=lambda item: item["total"], reverse=reverse)
 
-        # Stats
-        print(f'\n| Container | Anzahl Ordner | Anzahl Dateien |')
-        for container_name, container_list in sorted_map.items():
-            dir_counter = 0
-            item_counter = 0
-            for directory in sorted_map[container_name]:
-                dir_counter += 1
-                item_counter += directory['total']
-            print(f'| {container_name} | {dir_counter} | {item_counter} |')
+        return sorted_map
 
+    def _print_low_hanging_fruits(self, sorted_map: dict):
         # Low-hanging fruit
         low_fruit_list = []
         for container_name, container_list in sorted_map.items():
@@ -129,11 +122,7 @@ class PhotoPal:
             print(f'"{fruit["container_name"].split(" ")[1]}/{fruit["name"]}" '
                   f'({fruit["images"]} Bilder, {fruit["videos"]} Videos)')
 
-        # Sort by number of images and videos - reversed
-        sorted_map = {}
-        for key, container_dict in self.dir_map.items():
-            sorted_map[key] = sorted(container_dict, key=lambda item: item["total"], reverse=True)
-
+    def _print_challenges(self, sorted_map: dict):
         challenge_list = []
         for container_name, container_list in sorted_map.items():
             for directory in sorted_map[container_name]:
@@ -148,9 +137,28 @@ class PhotoPal:
             print(f'"{challenge["container_name"].split(" ")[1]}/{challenge["name"]}" '
                   f'({challenge["images"]} Bilder, {challenge["videos"]} Videos)')
 
+    def process(self):
+        sorted_map_asc = self._get_sorted_map_for_directories(reverse=False)
+
+        # Stats
+        print(f'\n| Container | Anzahl Ordner | Anzahl Dateien |')
+        for container_name, container_list in sorted_map_asc.items():
+            dir_counter = 0
+            item_counter = 0
+            for directory in sorted_map_asc[container_name]:
+                dir_counter += 1
+                item_counter += directory['total']
+            print(f'| {container_name} | {dir_counter} | {item_counter} |')
+
+        # Print low-hanging fruits
+        self._print_low_hanging_fruits(sorted_map=sorted_map_asc)
+
+        # Print challenges
+        self._print_challenges(sorted_map=self._get_sorted_map_for_directories(reverse=True))
+
         # Make a suggestion
         suggestion_list = []
-        for key, container_dict in sorted_map.items():
+        for key, container_dict in sorted_map_asc.items():
             suggestion_list.append(
                 self._prettify_suggestion_string(
                     self._pick_suggestion(container=container_dict), container=key

@@ -70,6 +70,8 @@ class PhotoPal:
             )
 
     def _pick_suggestion(self, container) -> dict:
+        if len(container) == 0:
+            return {"name": "Der Ordner ist leer", "images": 0, "videos": 0}
         random_index = random.randint(
             0, min(len(container) - 1, self.MAX_DIRS_TO_CHOSE_FROM)
         )

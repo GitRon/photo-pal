@@ -7,7 +7,7 @@ import exifread
 
 
 class PhotoTimestampRenamer:
-    DIR_PATH = r"D:\Fotos\neu + unsortiert\B Merge notwendig\Weiberfastnacht (12.02.2015)\Lena"
+    DIR_PATH = r"D:\Dropbox\kamera-uploads\Von Jessi"
 
     def get_exif_data(self, image_path) -> Optional[str]:
         # Öffne das Bild und lese die EXIF-Daten

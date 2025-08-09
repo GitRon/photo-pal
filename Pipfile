@@ -5,6 +5,7 @@ name = "pypi"
 
 [packages]
 exifread = "*"
+pyexiv2 = "*"
 
 [dev-packages]
 

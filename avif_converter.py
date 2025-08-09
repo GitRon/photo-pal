@@ -5,9 +5,7 @@ from PIL import Image
 
 
 class AvifConverter:
-    DIR_PATH = (
-        r"D:\path\to\dir"
-    )
+    DIR_PATH = r"D:\path\to\dir"
 
     def process(self):
         conversion_counter = 0

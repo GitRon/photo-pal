@@ -6,7 +6,7 @@ from pathlib import Path
 class PhotoPal:
     FOTO_PATH = "D:\\Fotos\\neu + unsortiert\\"
 
-    IMAGE_TYPES = [".jpg", ".jpeg", ".png"]
+    IMAGE_TYPES = [".jpg", ".jpeg", ".png", ".heic"]
     VIDEO_TYPES = [".mp4", ".mov", ".avi"]
 
     MAX_DIRS_TO_CHOSE_FROM = 7

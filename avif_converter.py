@@ -5,9 +5,17 @@ from PIL import Image
 
 
 class AvifConverter:
+    """Convert every AVIF image in ``DIR_PATH`` to JPEG.
+
+    Scans ``DIR_PATH`` for files with a ``.avif`` extension, opens each one,
+    converts it to RGB and saves a ``.jpg`` copy alongside the original. The
+    source ``.avif`` files are left untouched.
+    """
+
     DIR_PATH = r"D:\path\to\dir"
 
     def process(self):
+        """Convert all AVIF files in ``DIR_PATH`` and print the number converted."""
         conversion_counter = 0
 
         for element in os.scandir(Path(self.DIR_PATH)):

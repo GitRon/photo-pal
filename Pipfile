@@ -7,6 +7,7 @@ name = "pypi"
 exifread = "*"
 pyexiv2 = "*"
 Pillow = "*"
+pillow-heif = "*"
 
 [dev-packages]
 

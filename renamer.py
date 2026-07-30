@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 class Renamer:
-    FOTO_DIR = r"C:\Users\Ronny\Desktop\falsch benannt"
+    FOTO_DIR = r"D:\Dropbox\Fotos\neu + unsortiert\B Merge notwendig\Griechenland (13.-29.4.26)\Chris"
 
     PATTERN_OLD_SAMSUNG = r"^(\d{4})(\d{2})(\d{2})[_\-](\d{2})(\d{2})(\d{2})%s$"
     PATTERN_GOOGLE = r"^PXL_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})\d{3}.*?%s$"

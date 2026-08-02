@@ -1,3 +1,4 @@
+import ctypes
 import os
 import re
 import sys
@@ -6,10 +7,71 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PIL import Image, ImageOps, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
 from pillow_heif import register_heif_opener
 
 register_heif_opener()
+
+# -- recycle bin -----------------------------------------------------------
+# Deleting through the shell rather than through ``os.remove`` is what puts a
+# picture into the recycle bin instead of wiping it off the disk.
+
+FO_DELETE = 3
+FOF_SILENT = 0x0004
+FOF_NOCONFIRMATION = 0x0010
+FOF_ALLOWUNDO = 0x0040
+FOF_NOERRORUI = 0x0400
+
+
+class ShFileOpStruct(ctypes.Structure):
+    """Argument block of the Win32 ``SHFileOperationW`` call.
+
+    ``fFlags`` is a 16 bit field followed by padding, so spending a full
+    ``c_uint`` on it keeps every later member on the offset Windows expects.
+    """
+
+    _fields_ = [
+        ("hwnd", ctypes.c_void_p),
+        ("wFunc", ctypes.c_uint),
+        ("pFrom", ctypes.c_wchar_p),
+        ("pTo", ctypes.c_wchar_p),
+        ("fFlags", ctypes.c_uint),
+        ("fAnyOperationsAborted", ctypes.c_int),
+        ("hNameMappings", ctypes.c_void_p),
+        ("lpszProgressTitle", ctypes.c_wchar_p),
+    ]
+
+
+def move_to_recycle_bin(*, file_path: Path) -> None:
+    """Move one file to the recycle bin, raising ``OSError`` if that fails."""
+    if os.name != "nt":
+        raise OSError("the recycle bin is only wired up for Windows")
+
+    path = str(file_path.resolve())
+    # A share has no recycle bin, and Windows would quietly delete for good
+    if path.startswith("\\\\"):
+        raise OSError("files on a network share cannot be recycled")
+
+    operation = ShFileOpStruct(
+        hwnd=None,
+        wFunc=FO_DELETE,
+        # The list of files to delete has to end on a second null character
+        pFrom=f"{path}\0\0",
+        pTo=None,
+        fFlags=FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI,
+        fAnyOperationsAborted=False,
+        hNameMappings=None,
+        lpszProgressTitle=None,
+    )
+    shell = ctypes.windll.shell32
+    shell.SHFileOperationW.argtypes = [ctypes.POINTER(ShFileOpStruct)]
+    shell.SHFileOperationW.restype = ctypes.c_int
+
+    result = shell.SHFileOperationW(ctypes.byref(operation))
+    if result:
+        raise OSError(f"the shell refused to delete the file (code {result})")
+    if operation.fAnyOperationsAborted:
+        raise OSError("the move to the recycle bin was aborted")
 
 
 class PictureNamer:
@@ -20,14 +82,14 @@ class PictureNamer:
     The date is the day the picture was taken, the extension is kept as is.
     """
 
-    DIR_PATH = r"D:\Dropbox\Fotos\neu + unsortiert\C Chaos\Handy-Fotos 2024"
+    DIR_PATH = r"D:\Dropbox\Fotos\neu + unsortiert\C Chaos\Handy-Fotos 2019"
 
     IMAGE_TYPES = (".jpg", ".jpeg", ".png", ".heic", ".avif", ".webp", ".gif")
 
     # Timestamps written by ``renamer.py`` / ``exif.py``: "2026-04-13 14.30.22"
     PATTERN_TIMESTAMP = r"^(\d{4})-(\d{2})-(\d{2})[\s_]"
     # Names this tool has written before: "Office at night (13.04.26)"
-    PATTERN_NAMED = r"^(.*)\s\(\d{2}\.\d{2}\.\d{2}\)$"
+    PATTERN_NAMED = r"^(.*)\s\((\d{2})\.(\d{2})\.(\d{2})\)$"
 
     # "DateTimeOriginal" lives in the Exif sub-IFD, "DateTime" in the main one
     EXIF_IFD = 0x8769
@@ -41,9 +103,29 @@ class PictureNamer:
     HINT_COLOR = "#888888"
     PREVIEW_COLOR = "#7ec699"
     ERROR_COLOR = "#e06c75"
+    TRASH_COLOR = "#d19a66"
 
     CACHE_SIZE = 5
     RESIZE_DEBOUNCE_MS = 100
+
+    # -- "next up" panel, in its own column right of the picture -----------
+    PREVIEW_COUNT = 3
+    TILE_SIZE = (150, 106)
+    # The picture sits inside the tile, so the tile border stays visible
+    THUMB_SIZE = (138, 94)
+    PANEL_PADDING = 10
+    PANEL_MARGIN = 14
+    TILE_GAP = 8
+    HEADER_HEIGHT = 20
+    THUMB_CACHE_SIZE = 16
+    # Below this the column would cost the picture more than it is worth
+    MIN_PICTURE_WIDTH = 380
+    # The panel no longer sits on the picture, so it may be solid: a card
+    # lifted off the background, with the tiles sunk back into it
+    PANEL_FILL = (38, 38, 38, 255)
+    PANEL_OUTLINE = (255, 255, 255, 20)
+    TILE_FILL = (0, 0, 0, 120)
+    TILE_OUTLINE = (255, 255, 255, 40)
 
     def __init__(self, *, dir_path: str) -> None:
         super().__init__()
@@ -53,10 +135,18 @@ class PictureNamer:
         # Keeps typed but not yet saved names, so navigating away loses nothing
         self.draft_map: dict[Path, str] = {}
         self.image_cache: dict[Path, Image.Image] = {}
+        # Small previews are kept apart from the full images: the panel would
+        # otherwise push the picture you are looking at out of the cache
+        self.thumb_cache: dict[Path, Optional[Image.Image]] = {}
+        self.font_cache: dict[tuple[int, bool], ImageFont.ImageFont] = {}
         self.rendered_size: tuple[int, int] = (0, 0)
-        self.rendered_path: Optional[Path] = None
+        self.rendered_key: Optional[tuple] = None
         self.photo_image: Optional[ImageTk.PhotoImage] = None
         self.resize_job: Optional[str] = None
+        # Field content at the moment a message was put on the preview line.
+        # Every shortcut ends with a key release, and that release must not
+        # wipe the confirmation the shortcut just wrote.
+        self.status_entry_text: Optional[str] = None
 
     def _collect_images(self) -> list[Path]:
         images = [
@@ -70,6 +160,17 @@ class PictureNamer:
     def current_path(self) -> Path:
         return self.image_paths[self.current_index]
 
+    def next_paths(self) -> list[Path]:
+        """The pictures coming up, at most ``PREVIEW_COUNT``, never the current one."""
+        paths = []
+        for step in range(1, self.PREVIEW_COUNT + 1):
+            index = (self.current_index + step) % len(self.image_paths)
+            # Fewer pictures than preview slots: stop before wrapping onto self
+            if index == self.current_index:
+                break
+            paths.append(self.image_paths[index])
+        return paths
+
     # -- date resolution ---------------------------------------------------
 
     def _date_from_exif(self, *, image_path: Path) -> Optional[datetime]:
@@ -79,7 +180,9 @@ class PictureNamer:
                 date_taken = exif.get_ifd(self.EXIF_IFD).get(
                     self.EXIF_DATE_TIME_ORIGINAL
                 ) or exif.get(self.EXIF_DATE_TIME)
-        except (OSError, SyntaxError, ValueError):
+        # Broken or half written EXIF blocks raise all sorts of things, and a
+        # missing date is not a reason to give up on the picture
+        except (OSError, SyntaxError, ValueError, TypeError, KeyError):
             return None
 
         if not date_taken:
@@ -100,6 +203,18 @@ class PictureNamer:
         except ValueError:
             return None
 
+    def _date_from_own_name(self, *, image_path: Path) -> Optional[datetime]:
+        matches = re.search(self.PATTERN_NAMED, image_path.stem)
+        if not matches:
+            return None
+
+        try:
+            return datetime.strptime(
+                f"{matches[2]}.{matches[3]}.{matches[4]}", "%d.%m.%y"
+            )
+        except ValueError:
+            return None
+
     def get_date_taken(self, *, image_path: Path) -> tuple[datetime, str]:
         """Return the date of the picture plus where that date came from."""
         date_taken = self._date_from_exif(image_path=image_path)
@@ -109,6 +224,12 @@ class PictureNamer:
         date_taken = self._date_from_filename(image_path=image_path)
         if date_taken:
             return date_taken, "filename"
+
+        # A picture named earlier already carries the date we worked out back
+        # then. Without this a rename would reset it to today's file date.
+        date_taken = self._date_from_own_name(image_path=image_path)
+        if date_taken:
+            return date_taken, "existing name"
 
         return datetime.fromtimestamp(image_path.stat().st_mtime), "file date"
 
@@ -150,6 +271,134 @@ class PictureNamer:
                 self.image_cache.pop(next(iter(self.image_cache)))
 
         return self.image_cache[image_path]
+
+    def load_thumbnail(self, *, image_path: Path) -> Optional[Image.Image]:
+        """A small preview, or ``None`` if the file cannot be read at all."""
+        if image_path in self.thumb_cache:
+            return self.thumb_cache[image_path]
+
+        try:
+            with Image.open(image_path) as im:
+                # Lets the JPEG decoder skip straight to a small size
+                im.draft("RGB", self.THUMB_SIZE)
+                thumb = ImageOps.exif_transpose(im)
+                thumb.thumbnail(self.THUMB_SIZE, Image.LANCZOS)
+                thumb = thumb.convert("RGB")
+        except (OSError, SyntaxError, ValueError):
+            thumb = None
+
+        self.thumb_cache[image_path] = thumb
+        if len(self.thumb_cache) > self.THUMB_CACHE_SIZE:
+            self.thumb_cache.pop(next(iter(self.thumb_cache)))
+
+        return thumb
+
+    # -- drawing helpers ---------------------------------------------------
+
+    @staticmethod
+    def _rgb(*, color: str) -> tuple[int, int, int]:
+        """``"#7ec699"`` to ``(126, 198, 153)``, ready for a PIL fill."""
+        return tuple(int(color[index : index + 2], 16) for index in (1, 3, 5))
+
+    def _font(self, *, size: int, bold: bool = False) -> ImageFont.ImageFont:
+        key = (size, bold)
+        if key not in self.font_cache:
+            try:
+                name = "segoeuib.ttf" if bold else "segoeui.ttf"
+                self.font_cache[key] = ImageFont.truetype(name, size)
+            except OSError:
+                self.font_cache[key] = ImageFont.load_default()
+        return self.font_cache[key]
+
+    @staticmethod
+    def _draw_centered(*, draw, box, text, font, fill) -> None:
+        """Centre ``text`` in ``box``; works with bitmap fonts, too."""
+        left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+        x = box[0] + (box[2] - box[0] - (right - left)) // 2 - left
+        y = box[1] + (box[3] - box[1] - (bottom - top)) // 2 - top
+        draw.text((x, y), text, font=font, fill=fill)
+
+    def _preview_panel_size(self, *, count: int) -> tuple[int, int]:
+        tile_width, tile_height = self.TILE_SIZE
+        padding = self.PANEL_PADDING
+        return (
+            tile_width + 2 * padding,
+            2 * padding
+            + self.HEADER_HEIGHT
+            + count * tile_height
+            + (count - 1) * self.TILE_GAP,
+        )
+
+    def _build_preview_panel(self, *, paths: list[Path]) -> Image.Image:
+        """The stack of upcoming pictures, drawn as a card of its own."""
+        tile_width, tile_height = self.TILE_SIZE
+        padding = self.PANEL_PADDING
+        width, height = self._preview_panel_size(count=len(paths))
+
+        panel = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(panel)
+        draw.rounded_rectangle(
+            (0, 0, width - 1, height - 1),
+            radius=12,
+            fill=self.PANEL_FILL,
+            outline=self.PANEL_OUTLINE,
+        )
+        draw.text(
+            (padding + 2, padding),
+            "NEXT UP",
+            font=self._font(size=10, bold=True),
+            fill=self._rgb(color=self.HINT_COLOR) + (255,),
+        )
+
+        accent = self._rgb(color=self.PREVIEW_COLOR)
+        top = padding + self.HEADER_HEIGHT
+        for position, image_path in enumerate(paths, start=1):
+            tile = (padding, top, padding + tile_width, top + tile_height)
+            draw.rounded_rectangle(tile, radius=8, fill=self.TILE_FILL)
+
+            thumb = self.load_thumbnail(image_path=image_path)
+            if thumb:
+                panel.paste(
+                    thumb,
+                    (
+                        tile[0] + (tile_width - thumb.width) // 2,
+                        tile[1] + (tile_height - thumb.height) // 2,
+                    ),
+                )
+            else:
+                self._draw_centered(
+                    draw=draw,
+                    box=tile,
+                    text="?",
+                    font=self._font(size=18),
+                    fill=self._rgb(color=self.ERROR_COLOR) + (220,),
+                )
+
+            # The one you land on next is highlighted, the rest stay quiet
+            is_next = position == 1
+            draw.rounded_rectangle(
+                tile,
+                radius=8,
+                outline=accent + (230,) if is_next else self.TILE_OUTLINE,
+                width=2 if is_next else 1,
+            )
+
+            badge = (tile[0] + 4, tile[1] + 4, tile[0] + 22, tile[1] + 22)
+            draw.ellipse(
+                badge,
+                fill=accent + (235,) if is_next else (0, 0, 0, 170),
+            )
+            self._draw_centered(
+                draw=draw,
+                box=badge,
+                text=str(position),
+                font=self._font(size=10, bold=True),
+                fill=(20, 20, 20, 255) if is_next else (235, 235, 235, 255),
+            )
+
+            top += tile_height + self.TILE_GAP
+
+        return panel
 
     # -- ui ----------------------------------------------------------------
 
@@ -208,7 +457,7 @@ class PictureNamer:
             anchor="w",
             text=(
                 "\u2190/\u2192 navigate (alt+\u2190/\u2192 always)   "
-                "ctrl+s save   esc quit"
+                "ctrl+s save   del recycle bin (alt+del always)   esc quit"
             ),
             bg=self.BACKGROUND_COLOR,
             fg=self.HINT_COLOR,
@@ -218,6 +467,8 @@ class PictureNamer:
         self.entry.bind("<KeyRelease>", self._on_type)
         self.entry.bind("<Left>", self._on_left)
         self.entry.bind("<Right>", self._on_right)
+        self.entry.bind("<Delete>", self._on_delete)
+        self.window.bind("<Alt-Delete>", lambda event: self._trash_current())
         self.window.bind("<Control-s>", self._on_save)
         self.window.bind("<Control-S>", self._on_save)
         self.window.bind("<Alt-Left>", lambda event: self._navigate(step=-1))
@@ -233,21 +484,96 @@ class PictureNamer:
         height = self.canvas.winfo_height()
         if width < 2 or height < 2:
             return
-        # Same picture at the same size is already on screen
-        if (width, height) == self.rendered_size and (
-            self.rendered_path == self.current_path
-        ):
+
+        has_pictures = bool(self.image_paths)
+        next_paths = self.next_paths() if has_pictures else []
+        key = (
+            width,
+            height,
+            self.current_path if has_pictures else None,
+            tuple(next_paths),
+        )
+        # The very same thing is already on screen
+        if key == self.rendered_key:
             return
 
-        image = self.load_image(image_path=self.current_path).copy()
-        image.thumbnail((width, height), Image.LANCZOS)
-        self.photo_image = ImageTk.PhotoImage(image)
+        # Picture and panel are composited into one image and handed to the
+        # canvas as a whole. Keeps the two from ever disagreeing about who
+        # owns which pixel, and lets the panel carry rounded corners.
+        frame = Image.new("RGB", (width, height), self.BACKGROUND_COLOR)
+        if not has_pictures:
+            self._draw_centered(
+                draw=ImageDraw.Draw(frame),
+                box=(0, 0, width, height),
+                text="No pictures left in this folder",
+                font=self._font(size=16),
+                fill=self._rgb(color=self.HINT_COLOR),
+            )
+        else:
+            # The panel gets its own column, the picture takes what is left of
+            # the width - so nothing is ever hidden behind it
+            panel_count = self._fitting_preview_count(paths=next_paths, height=height)
+            column_width = 0
+            if panel_count:
+                column_width = (
+                    self._preview_panel_size(count=panel_count)[0]
+                    + 2 * self.PANEL_MARGIN
+                )
+                if width - column_width < self.MIN_PICTURE_WIDTH:
+                    column_width = 0
+
+            self._paste_picture(frame=frame, area_width=width - column_width)
+            if column_width:
+                self._paste_preview_panel(frame=frame, paths=next_paths[:panel_count])
+
+        self.photo_image = ImageTk.PhotoImage(frame)
         self.canvas.delete("all")
-        self.canvas.create_image(
-            width // 2, height // 2, anchor=tk.CENTER, image=self.photo_image
-        )
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo_image)
         self.rendered_size = (width, height)
-        self.rendered_path = self.current_path
+        self.rendered_key = key
+
+    def _fitting_preview_count(self, *, paths: list[Path], height: int) -> int:
+        """How many previews fit the window height - fewer beats none."""
+        for count in range(len(paths), 0, -1):
+            _, panel_height = self._preview_panel_size(count=count)
+            if panel_height + 2 * self.PANEL_MARGIN <= height:
+                return count
+        return 0
+
+    def _paste_picture(self, *, frame: Image.Image, area_width: int) -> None:
+        try:
+            image = self.load_image(image_path=self.current_path).copy()
+        except (OSError, SyntaxError, ValueError):
+            # A file we cannot decode must not take the whole tool down - you
+            # can still read its name in the footer and skip past it
+            self._draw_centered(
+                draw=ImageDraw.Draw(frame),
+                box=(0, 0, area_width, frame.height),
+                text="This picture cannot be displayed",
+                font=self._font(size=16),
+                fill=self._rgb(color=self.ERROR_COLOR),
+            )
+            return
+
+        image.thumbnail((area_width, frame.height), Image.LANCZOS)
+        position = (
+            (area_width - image.width) // 2,
+            (frame.height - image.height) // 2,
+        )
+        if image.mode in ("RGBA", "LA", "P"):
+            # Transparent PNGs and GIFs keep the dark background behind them
+            image = image.convert("RGBA")
+            frame.paste(image, position, image)
+        else:
+            frame.paste(image.convert("RGB"), position)
+
+    def _paste_preview_panel(self, *, frame: Image.Image, paths: list[Path]) -> None:
+        panel = self._build_preview_panel(paths=paths)
+        frame.paste(
+            panel,
+            (frame.width - panel.width - self.PANEL_MARGIN, self.PANEL_MARGIN),
+            panel,
+        )
 
     def _render_footer(self):
         date_taken, source = self.get_date_taken(image_path=self.current_path)
@@ -260,7 +586,18 @@ class PictureNamer:
         )
         self._update_preview()
 
+    def _set_status(self, *, text: str, color: str):
+        """Put a message on the preview line and let it stand until you type."""
+        self.preview_label.configure(text=text, fg=color)
+        self.status_entry_text = self.entry.get()
+
     def _update_preview(self):
+        if self.status_entry_text is not None:
+            # Nothing was typed since the message went up, so it stays
+            if self.entry.get() == self.status_entry_text:
+                return
+            self.status_entry_text = None
+
         name = self.entry.get().strip()
         if not name:
             self.preview_label.configure(
@@ -274,12 +611,26 @@ class PictureNamer:
         )
 
     def _show_current(self):
+        # Leaving the picture ends whatever message was standing about it
+        self.status_entry_text = None
+        if not self.image_paths:
+            self._show_empty()
+            return
+
         self.entry.delete(0, tk.END)
         self.entry.insert(0, self.draft_map.get(self.current_path, ""))
         self.entry.icursor(tk.END)
         self.entry.focus_set()
         self._render_image()
         self._render_footer()
+
+    def _show_empty(self):
+        """Every picture of the folder has been sent to the recycle bin."""
+        self.entry.delete(0, tk.END)
+        self.entry.configure(state=tk.DISABLED)
+        self.info_label.configure(text="0 / 0")
+        self._set_status(text="Nothing left to name here", color=self.HINT_COLOR)
+        self._render_image()
 
     def _remember_draft(self):
         name = self.entry.get().strip()
@@ -317,16 +668,58 @@ class PictureNamer:
         return "break"
 
     def _navigate(self, *, step: int):
+        if not self.image_paths:
+            return "break"
         self._remember_draft()
         self.current_index = (self.current_index + step) % len(self.image_paths)
         self._show_current()
         return "break"
 
+    def _on_delete(self, event):
+        # Same rule as the arrow keys: the field comes first, so del only
+        # reaches the picture once there is no text left for it to edit
+        if self.entry.get() or self.entry.selection_present():
+            return None
+        return self._trash_current()
+
+    def _trash_current(self):
+        """Hand the current picture to the recycle bin and move on."""
+        if not self.image_paths:
+            return "break"
+
+        image_path = self.current_path
+        try:
+            move_to_recycle_bin(file_path=image_path)
+        except OSError as error:
+            self._set_status(
+                text=f"Could not delete {image_path.name}: {error}",
+                color=self.ERROR_COLOR,
+            )
+            return "break"
+
+        self.image_cache.pop(image_path, None)
+        self.thumb_cache.pop(image_path, None)
+        self.draft_map.pop(image_path, None)
+        self.image_paths.pop(self.current_index)
+        # The picture that slid into this slot is the one to look at next, and
+        # after the last one that is the first again
+        if self.current_index >= len(self.image_paths):
+            self.current_index = 0
+
+        self._show_current()
+        self._set_status(
+            text=f"\U0001f5d1 Recycle bin: {image_path.name}", color=self.TRASH_COLOR
+        )
+        return "break"
+
     def _on_save(self, event):
+        if not self.image_paths:
+            return "break"
+
         name = self.entry.get().strip()
         if not re.sub(self.FORBIDDEN_CHARS, "", name).strip():
-            self.preview_label.configure(
-                text="Nothing to save - the name is empty", fg=self.ERROR_COLOR
+            self._set_status(
+                text="Nothing to save - the name is empty", color=self.ERROR_COLOR
             )
             return "break"
 
@@ -336,6 +729,10 @@ class PictureNamer:
 
         self.image_cache.pop(image_path, None)
         self.draft_map.pop(image_path, None)
+        # The preview is still valid, only its key moved with the rename
+        thumb = self.thumb_cache.pop(image_path, None)
+        if thumb is not None:
+            self.thumb_cache[new_path] = thumb
         self.image_paths[self.current_index] = new_path
 
         # Straight on to the next picture, that is where the speed comes from
@@ -344,7 +741,10 @@ class PictureNamer:
         else:
             self._show_current()
 
-        self.info_label.configure(text=f"Saved: {new_path.name}")
+        # Confirm on the preview line, never on the info line: that one has to
+        # keep describing the picture you are looking at now. Typing the next
+        # name replaces this message on its own.
+        self._set_status(text=f"✓ Saved: {new_path.name}", color=self.PREVIEW_COLOR)
         return "break"
 
     def process(self):

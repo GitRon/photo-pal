@@ -85,7 +85,7 @@ class PictureNamer:
     instead - see ``QUICK_FOLDERS``.
     """
 
-    DIR_PATH = r"D:\Dropbox\Fotos\neu + unsortiert\C Chaos\Handy-Fotos 2023"
+    DIR_PATH = r"D:\Dropbox\Fotos\neu + unsortiert\C Chaos\Handy-Fotos 2026"
 
     IMAGE_TYPES = (".jpg", ".jpeg", ".png", ".heic", ".avif", ".webp", ".gif")
 
@@ -102,12 +102,37 @@ class PictureNamer:
     FORBIDDEN_CHARS = r'[\\/:*?"<>|]'
 
     # -- filing away -------------------------------------------------------
-    # One key moves the picture into ``<prefix> <year>/`` next to the folder it
-    # came from, without renaming anything: pictures of the flat or the office
-    # are documentation, and a name would tell you nothing a date does not.
+    # One key moves the picture into a folder next to the one it came from,
+    # without renaming anything: pictures of the flat or the office are
+    # documentation, and a name would tell you nothing the date does not.
     # The key only reaches the picture while the name field is empty, the same
     # rule del follows - alt+key works either way.
-    QUICK_FOLDERS = (("b", "Büro"), ("w", "Wohnung"))
+    #
+    # ``{month}`` and ``{year}`` are filled in from the date of the picture. A
+    # child grows out of a year in a month, so those go per month; a flat does
+    # not, so a year is as fine a drawer as there is.
+    QUICK_FOLDERS = (
+        ("b", "Büro {year}"),
+        ("w", "Wohnung {year}"),
+        ("a", "Adrian {month} {year}"),
+    )
+
+    # Spelled out rather than left to ``strftime``, which would follow whatever
+    # locale the machine happens to run in
+    MONTH_NAMES = (
+        "Januar",
+        "Februar",
+        "März",
+        "April",
+        "Mai",
+        "Juni",
+        "Juli",
+        "August",
+        "September",
+        "Oktober",
+        "November",
+        "Dezember",
+    )
 
     # Bit Tk sets in ``event.state`` while ctrl is held down
     CONTROL_MASK = 0x0004
@@ -255,6 +280,12 @@ class PictureNamer:
         clean_name = re.sub(self.FORBIDDEN_CHARS, "", name)
         clean_name = re.sub(r"\s+", " ", clean_name).strip().rstrip(".")
         return f"{clean_name} ({date_taken.strftime('%d.%m.%y')}){image_path.suffix}"
+
+    def build_folder_name(self, *, template: str, date_taken: datetime) -> str:
+        """Fill a ``QUICK_FOLDERS`` template in with the date of the picture."""
+        return template.format(
+            month=self.MONTH_NAMES[date_taken.month - 1], year=date_taken.year
+        )
 
     @staticmethod
     def _move_file(*, source: Path, target: Path) -> Path:
@@ -480,37 +511,51 @@ class PictureNamer:
             anchor="w",
             text=(
                 "\u2190/\u2192 navigate (alt+\u2190/\u2192 always)   "
-                "ctrl+s save   del recycle bin   "
-                + "   ".join(
-                    f"{key} \u2192 {prefix} <year>"
-                    for key, prefix in self.QUICK_FOLDERS
-                )
-                + "   (alt+key works while typing, too)   esc quit"
+                "ctrl+s save   del recycle bin   esc quit"
             ),
             bg=self.BACKGROUND_COLOR,
             fg=self.HINT_COLOR,
             font=("Segoe UI", 9),
         ).pack(fill=tk.X, pady=(6, 0))
 
+        # A line of their own: with three of them they no longer fit next to
+        # the rest, and this is the half of the help you read while working
+        tk.Label(
+            footer,
+            anchor="w",
+            text=(
+                "   ".join(
+                    f"{key} \u2192 {template.format(month='<month>', year='<year>')}\\"
+                    for key, template in self.QUICK_FOLDERS
+                )
+                + "   (alt+key works while typing, too)"
+            ),
+            bg=self.BACKGROUND_COLOR,
+            fg=self.HINT_COLOR,
+            font=("Segoe UI", 9),
+        ).pack(fill=tk.X, pady=(2, 0))
+
         self.entry.bind("<KeyRelease>", self._on_type)
         self.entry.bind("<Left>", self._on_left)
         self.entry.bind("<Right>", self._on_right)
         self.entry.bind("<Delete>", self._on_delete)
         self.window.bind("<Alt-Delete>", lambda event: self._trash_current())
-        for key, prefix in self.QUICK_FOLDERS:
+        for key, template in self.QUICK_FOLDERS:
             # The bare key goes to the field, which passes it on only when there
             # is no name in it. Alt reaches the field as well - and once the
             # field has handled it, the window binding no longer fires.
             self.entry.bind(
                 f"<KeyPress-{key}>",
-                lambda event, prefix=prefix: self._on_quick_key(
-                    event=event, folder_prefix=prefix
+                lambda event, template=template: self._on_quick_key(
+                    event=event, folder_template=template
                 ),
             )
             for pattern in (f"<Alt-{key}>", f"<Alt-{key.upper()}>"):
                 self.window.bind(
                     pattern,
-                    lambda event, prefix=prefix: self._file_away(folder_prefix=prefix),
+                    lambda event, template=template: self._file_away(
+                        folder_template=template
+                    ),
                 )
         self.window.bind("<Control-s>", self._on_save)
         self.window.bind("<Control-S>", self._on_save)
@@ -737,24 +782,26 @@ class PictureNamer:
         if self.current_index >= len(self.image_paths):
             self.current_index = 0
 
-    def _on_quick_key(self, *, event, folder_prefix: str):
+    def _on_quick_key(self, *, event, folder_template: str):
         # Same rule as del: the field comes first, so the letter only reaches
         # the picture once there is no name for it to be part of. Ctrl is left
-        # alone as well - ctrl+b moves the cursor, it does not file anything.
+        # alone as well - ctrl+a selects the name, it does not file anything.
         if event.state & self.CONTROL_MASK:
             return None
         if self.entry.get() or self.entry.selection_present():
             return None
-        return self._file_away(folder_prefix=folder_prefix)
+        return self._file_away(folder_template=folder_template)
 
-    def _file_away(self, *, folder_prefix: str):
-        """Move the current picture into ``<prefix> <year>/`` and move on."""
+    def _file_away(self, *, folder_template: str):
+        """Move the current picture into the folder ``folder_template`` names."""
         if not self.image_paths:
             return "break"
 
         image_path = self.current_path
         date_taken, _ = self.get_date_taken(image_path=image_path)
-        folder = self.dir_path / f"{folder_prefix} {date_taken.year}"
+        folder = self.dir_path / self.build_folder_name(
+            template=folder_template, date_taken=date_taken
+        )
         try:
             folder.mkdir(parents=True, exist_ok=True)
             new_path = self._move_file(

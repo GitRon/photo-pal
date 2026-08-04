@@ -80,9 +80,12 @@ class PictureNamer:
     Shows every image of ``DIR_PATH`` one by one. Type a name into the text
     field and press ctrl+s to rename the file to ``<name> (dd.mm.YY)<ext>``.
     The date is the day the picture was taken, the extension is kept as is.
+
+    A picture that needs no name at all can be filed away with a single key
+    instead - see ``QUICK_FOLDERS``.
     """
 
-    DIR_PATH = r"D:\Dropbox\Fotos\neu + unsortiert\C Chaos\Handy-Fotos 2019"
+    DIR_PATH = r"D:\Dropbox\Fotos\neu + unsortiert\C Chaos\Handy-Fotos 2023"
 
     IMAGE_TYPES = (".jpg", ".jpeg", ".png", ".heic", ".avif", ".webp", ".gif")
 
@@ -98,12 +101,24 @@ class PictureNamer:
 
     FORBIDDEN_CHARS = r'[\\/:*?"<>|]'
 
+    # -- filing away -------------------------------------------------------
+    # One key moves the picture into ``<prefix> <year>/`` next to the folder it
+    # came from, without renaming anything: pictures of the flat or the office
+    # are documentation, and a name would tell you nothing a date does not.
+    # The key only reaches the picture while the name field is empty, the same
+    # rule del follows - alt+key works either way.
+    QUICK_FOLDERS = (("b", "Büro"), ("w", "Wohnung"))
+
+    # Bit Tk sets in ``event.state`` while ctrl is held down
+    CONTROL_MASK = 0x0004
+
     BACKGROUND_COLOR = "#1e1e1e"
     TEXT_COLOR = "#dddddd"
     HINT_COLOR = "#888888"
     PREVIEW_COLOR = "#7ec699"
     ERROR_COLOR = "#e06c75"
     TRASH_COLOR = "#d19a66"
+    FILED_COLOR = "#61afef"
 
     CACHE_SIZE = 5
     RESIZE_DEBOUNCE_MS = 100
@@ -241,24 +256,32 @@ class PictureNamer:
         clean_name = re.sub(r"\s+", " ", clean_name).strip().rstrip(".")
         return f"{clean_name} ({date_taken.strftime('%d.%m.%y')}){image_path.suffix}"
 
-    def rename_image(self, *, image_path: Path, new_filename: str) -> Path:
-        """Rename the file, dodging collisions with a ``-1``, ``-2``, ... suffix."""
-        target = image_path.with_name(new_filename)
-        stem = target.stem
+    @staticmethod
+    def _move_file(*, source: Path, target: Path) -> Path:
+        """Move the file, dodging collisions with a ``-1``, ``-2``, ... suffix.
+
+        Asking ``os.rename`` and catching the refusal beats looking the target
+        up first: between the look and the move something else could take the
+        name, and the picture would be gone.
+        """
+        stem, suffix = target.stem, target.suffix
         failure_counter = 0
 
         while True:
-            if target == image_path:
-                return image_path
+            if target == source:
+                return source
             try:
-                os.rename(image_path, target)
+                os.rename(source, target)
             except FileExistsError:
                 failure_counter += 1
-                target = target.with_name(
-                    f"{stem}-{failure_counter}{image_path.suffix}"
-                )
+                target = target.with_name(f"{stem}-{failure_counter}{suffix}")
             else:
                 return target
+
+    def rename_image(self, *, image_path: Path, new_filename: str) -> Path:
+        return self._move_file(
+            source=image_path, target=image_path.with_name(new_filename)
+        )
 
     # -- image loading -----------------------------------------------------
 
@@ -457,7 +480,12 @@ class PictureNamer:
             anchor="w",
             text=(
                 "\u2190/\u2192 navigate (alt+\u2190/\u2192 always)   "
-                "ctrl+s save   del recycle bin (alt+del always)   esc quit"
+                "ctrl+s save   del recycle bin   "
+                + "   ".join(
+                    f"{key} \u2192 {prefix} <year>"
+                    for key, prefix in self.QUICK_FOLDERS
+                )
+                + "   (alt+key works while typing, too)   esc quit"
             ),
             bg=self.BACKGROUND_COLOR,
             fg=self.HINT_COLOR,
@@ -469,6 +497,21 @@ class PictureNamer:
         self.entry.bind("<Right>", self._on_right)
         self.entry.bind("<Delete>", self._on_delete)
         self.window.bind("<Alt-Delete>", lambda event: self._trash_current())
+        for key, prefix in self.QUICK_FOLDERS:
+            # The bare key goes to the field, which passes it on only when there
+            # is no name in it. Alt reaches the field as well - and once the
+            # field has handled it, the window binding no longer fires.
+            self.entry.bind(
+                f"<KeyPress-{key}>",
+                lambda event, prefix=prefix: self._on_quick_key(
+                    event=event, folder_prefix=prefix
+                ),
+            )
+            for pattern in (f"<Alt-{key}>", f"<Alt-{key.upper()}>"):
+                self.window.bind(
+                    pattern,
+                    lambda event, prefix=prefix: self._file_away(folder_prefix=prefix),
+                )
         self.window.bind("<Control-s>", self._on_save)
         self.window.bind("<Control-S>", self._on_save)
         self.window.bind("<Alt-Left>", lambda event: self._navigate(step=-1))
@@ -682,6 +725,55 @@ class PictureNamer:
             return None
         return self._trash_current()
 
+    def _forget_current(self):
+        """Take the current picture out of the walk, caches and draft with it."""
+        image_path = self.current_path
+        self.image_cache.pop(image_path, None)
+        self.thumb_cache.pop(image_path, None)
+        self.draft_map.pop(image_path, None)
+        self.image_paths.pop(self.current_index)
+        # The picture that slid into this slot is the one to look at next, and
+        # after the last one that is the first again
+        if self.current_index >= len(self.image_paths):
+            self.current_index = 0
+
+    def _on_quick_key(self, *, event, folder_prefix: str):
+        # Same rule as del: the field comes first, so the letter only reaches
+        # the picture once there is no name for it to be part of. Ctrl is left
+        # alone as well - ctrl+b moves the cursor, it does not file anything.
+        if event.state & self.CONTROL_MASK:
+            return None
+        if self.entry.get() or self.entry.selection_present():
+            return None
+        return self._file_away(folder_prefix=folder_prefix)
+
+    def _file_away(self, *, folder_prefix: str):
+        """Move the current picture into ``<prefix> <year>/`` and move on."""
+        if not self.image_paths:
+            return "break"
+
+        image_path = self.current_path
+        date_taken, _ = self.get_date_taken(image_path=image_path)
+        folder = self.dir_path / f"{folder_prefix} {date_taken.year}"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            new_path = self._move_file(
+                source=image_path, target=folder / image_path.name
+            )
+        except OSError as error:
+            self._set_status(
+                text=f"Could not move {image_path.name} to {folder.name}: {error}",
+                color=self.ERROR_COLOR,
+            )
+            return "break"
+
+        self._forget_current()
+        self._show_current()
+        self._set_status(
+            text=f"\U0001f4c1 {folder.name}\\{new_path.name}", color=self.FILED_COLOR
+        )
+        return "break"
+
     def _trash_current(self):
         """Hand the current picture to the recycle bin and move on."""
         if not self.image_paths:
@@ -697,15 +789,7 @@ class PictureNamer:
             )
             return "break"
 
-        self.image_cache.pop(image_path, None)
-        self.thumb_cache.pop(image_path, None)
-        self.draft_map.pop(image_path, None)
-        self.image_paths.pop(self.current_index)
-        # The picture that slid into this slot is the one to look at next, and
-        # after the last one that is the first again
-        if self.current_index >= len(self.image_paths):
-            self.current_index = 0
-
+        self._forget_current()
         self._show_current()
         self._set_status(
             text=f"\U0001f5d1 Recycle bin: {image_path.name}", color=self.TRASH_COLOR
